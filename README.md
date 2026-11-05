@@ -1,40 +1,45 @@
-# WorkBrief RAG 1단계: 문서 검색 기준선
+# WorkBrief
 
-압축을 `C:\Users\moko\Desktop\dev\agent`에 풀어 기존 파일을 덮어쓰세요.
+> **LLM·RAG 기반 매출 보고서 및 업무 문서 질의응답 AI 어시스턴트**
 
-바뀌는 파일:
-- `api.py`
-- `test_api.py`
-- `frontend\app\page.tsx`
-- `frontend\app\api\documents\upload\route.ts`
-- `frontend\app\api\documents\search\route.ts`
-- `operations_manual.txt` (합성 업무 매뉴얼 예시)
+WorkBrief는 반복적인 매출 보고 업무를 줄이고, 업무 문서에서 필요한 근거를 빠르게 찾도록 돕는 웹 서비스입니다. 숫자는 프로그램이 직접 계산하고, LLM은 계산 결과를 바탕으로 사람이 검토할 보고서 초안을 작성합니다.
 
-Python 서버를 멈춘 후 적용합니다.
+## 해결하려는 문제
 
-```powershell
-Ctrl+C
-Expand-Archive -LiteralPath "$env:USERPROFILE\Downloads\workbrief-rag-baseline.zip" -DestinationPath "C:\Users\moko\Desktop\dev\agent" -Force
-cd C:\Users\moko\Desktop\dev\agent
-.\.venv\Scripts\python.exe -m pytest -q
-.\.venv\Scripts\fastapi.exe dev api.py
-```
+매출 보고를 만들 때는 CSV 데이터를 정리하고, 지난달과 비교하고, 변화 내용을 문장으로 정리해야 합니다. 또 업무 매뉴얼에서 취소·환불·데이터 오류 같은 기준을 다시 찾아야 하는 경우도 많습니다.
 
-정상 테스트 결과는 `24 passed`입니다. 같은 Python 터미널을 계속 사용하면 키를 다시 등록할 필요가 없습니다.
+WorkBrief는 이 두 작업을 한 화면에서 처리합니다.
 
-화면에서 `operations_manual.txt`를 **업무 매뉴얼 등록**에 올린 뒤, 아래 질문을 입력해보세요.
+## 주요 기능
+
+- **CSV 매출 분석**: 지점별·월별 매출을 집계하고 이전 달과 비교합니다.
+- **데이터 검증**: 비어 있는 값, 중복 거래 ID, 잘못된 금액을 경고로 표시합니다.
+- **LLM 보고서 초안**: 검증된 계산 결과를 바탕으로 짧은 한국어 분석 메모를 작성합니다.
+- **업무 문서 근거 검색**: `.txt`, `.md` 매뉴얼을 문단 조각으로 나누고 질문과 관련된 근거를 찾습니다.
+- **AI 사용량 기록**: 모델, 토큰 수, 예상 비용, 응답 시간을 저장해 운영 비용을 확인합니다.
+
+## 신뢰성 원칙
+
+매출 금액과 증감은 LLM이 계산하지 않습니다. Python 데이터 처리 코드가 먼저 계산한 결과만 LLM에 전달합니다. 또한 AI가 숫자를 새로 만들어 문장에 넣으면 결과를 표시하지 않도록 막아, 그럴듯하지만 틀린 보고서가 나오는 위험을 줄였습니다.
+
+## 현재 RAG 단계
+
+현재는 RAG의 첫 단계인 **검색(Retrieval)** 을 구현했습니다. 질문에 들어 있는 핵심 단어와 업무 문서 조각을 비교해 관련 근거를 보여줍니다. 다음 단계에서는 임베딩 기반 의미 검색, 근거를 인용하는 LLM 답변, 검색 품질 평가를 추가할 예정입니다.
+
+## 기술 구성
+
+| 영역 | 사용 기술 |
+| --- | --- |
+| Frontend | Next.js, TypeScript, React, Tailwind CSS |
+| Backend | Python, FastAPI, Pydantic |
+| LLM | OpenAI Responses API, Structured Outputs |
+| Data | SQLite, CSV |
+| Test | pytest, FastAPI TestClient |
+
+## 구조
 
 ```text
-취소 거래는 매출에서 어떻게 처리해?
+Next.js 화면 → Next.js API Route → FastAPI → CSV / SQLite / OpenAI API
 ```
 
-관련 문단이 `operations_manual.txt · 문단 조각 2`처럼 나타납니다.
-
-## 이번 단계에서 쓴 기술
-
-- **SQLite**: 문서와 문단 조각을 작은 로컬 데이터베이스에 저장합니다. 현재 규모에서는 설치 없이 Python에 내장되어 있어 적합합니다.
-- **청킹(chunking)**: 긴 문서를 약 500글자 이하의 작은 조각으로 나눕니다. 나중에 AI에 관련 조각만 줄 수 있어 비용과 혼선을 줄입니다.
-- **단어 기반 검색**: 질문 단어와 겹치는 문단을 점수로 정렬합니다. 무료이고 결과를 이해하기 쉬워 임베딩 검색을 비교할 기준선으로 씁니다.
-- **출처 표시**: 답변보다 먼저 근거를 보여줍니다. 다음 단계의 AI 답변이 근거 없는 말을 하지 않게 하는 안전장치입니다.
-
-이 단계에서는 AI API를 호출하지 않습니다. 실제 고객 문서가 아닌 합성 예시 문서로 연습하세요.
+사용자의 API 키는 브라우저나 Git 저장소에 저장하지 않고, 서버 실행 환경에서만 읽습니다.
