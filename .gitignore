@@ -1,0 +1,22 @@
+# 비밀값: API 키 등은 이 파일에 저장하지 않고 환경 변수로만 사용합니다.
+.env
+.env.*
+!.env.example
+
+# Python 가상환경·자동 생성 파일
+.venv/
+__pycache__/
+*.py[cod]
+
+# Node.js / Next.js가 자동으로 만드는 파일
+frontend/node_modules/
+frontend/.next/
+
+# 내 컴퓨터에만 둘 업무 문서·AI 사용 기록 데이터베이스
+workbrief.db
+*.db
+
+# 에디터·운영체제가 자동으로 만드는 파일
+.vscode/
+.DS_Store
+Thumbs.db
