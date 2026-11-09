@@ -1,11 +1,14 @@
 """Check the web route with real HTTP requests inside the test process."""
 
+import os
 from pathlib import Path
 
 import pytest
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
+
+os.environ["WORKBRIEF_DOCUMENT_STORE"] = "sqlite"
 
 import api
 

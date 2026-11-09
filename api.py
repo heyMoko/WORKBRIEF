@@ -16,6 +16,7 @@ from fastapi import FastAPI, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from main import calculate_sales, calculate_sales_rows
+from database import initialize_postgres_schema, open_connection
 
 
 app = FastAPI(title="WorkBrief")
@@ -294,21 +295,53 @@ def initialize_usage_db(connection):
     )
 
 
+def use_postgres_store():
+    """The running app uses PostgreSQL; isolated unit tests choose SQLite."""
+    return os.getenv("WORKBRIEF_DOCUMENT_STORE", "postgres").casefold() == "postgres"
+
+
 def save_agent_trace(result):
-    """Store operational metadata only; the user's question and document content are not stored."""
+    """Store operational metadata only; the question and document content are not stored."""
     usage = result["usage"]
     tools = [item["tool"] for item in result["tool_trace"]]
+    created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    if use_postgres_store():
+        initialize_postgres_schema()
+        with open_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """INSERT INTO agent_traces
+                    (created_at, tools_json, model, total_tokens, elapsed_ms, estimated_cost_usd)
+                    VALUES (%s, %s::jsonb, %s, %s, %s, %s)""",
+                    (created_at, json.dumps(tools), usage["model"], usage["total_tokens"], usage["elapsed_ms"], usage["estimated_cost_usd"]),
+                )
+        return
+
     with sqlite3.connect(DB_FILE) as connection:
         initialize_usage_db(connection)
         connection.execute(
             """INSERT INTO agent_traces
             (created_at, tools_json, model, total_tokens, elapsed_ms, estimated_cost_usd)
             VALUES (?, ?, ?, ?, ?, ?)""",
-            (datetime.now(timezone.utc).isoformat(timespec="seconds"), json.dumps(tools), usage["model"], usage["total_tokens"], usage["elapsed_ms"], usage["estimated_cost_usd"]),
+            (created_at, json.dumps(tools), usage["model"], usage["total_tokens"], usage["elapsed_ms"], usage["estimated_cost_usd"]),
         )
 
 
 def read_agent_traces():
+    if use_postgres_store():
+        initialize_postgres_schema()
+        with open_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT COUNT(*) AS calls, COALESCE(SUM(total_tokens), 0) AS total_tokens, COALESCE(SUM(estimated_cost_usd), 0) AS estimated_cost_usd FROM agent_traces"
+                )
+                summary = cursor.fetchone()
+                cursor.execute(
+                    "SELECT created_at, tools_json, model, total_tokens, elapsed_ms, estimated_cost_usd FROM agent_traces ORDER BY id DESC LIMIT 10"
+                )
+                recent = cursor.fetchall()
+        return {"summary": dict(summary), "recent": [{**dict(row), "tools": row["tools_json"]} for row in recent]}
+
     with sqlite3.connect(DB_FILE) as connection:
         connection.row_factory = sqlite3.Row
         initialize_usage_db(connection)
@@ -319,27 +352,63 @@ def read_agent_traces():
 
 def save_usage(usage):
     created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    values = (
+        created_at,
+        usage["model"],
+        usage["input_tokens"],
+        usage["output_tokens"],
+        usage["total_tokens"],
+        usage["elapsed_ms"],
+        usage["estimated_cost_usd"],
+    )
+    if use_postgres_store():
+        initialize_postgres_schema()
+        with open_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """INSERT INTO ai_usage
+                    (created_at, model, input_tokens, output_tokens, total_tokens, elapsed_ms, estimated_cost_usd)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                    values,
+                )
+        return
+
     with sqlite3.connect(DB_FILE) as connection:
         initialize_usage_db(connection)
         connection.execute(
-            """
-            INSERT INTO ai_usage
+            """INSERT INTO ai_usage
             (created_at, model, input_tokens, output_tokens, total_tokens, elapsed_ms, estimated_cost_usd)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                created_at,
-                usage["model"],
-                usage["input_tokens"],
-                usage["output_tokens"],
-                usage["total_tokens"],
-                usage["elapsed_ms"],
-                usage["estimated_cost_usd"],
-            ),
+            VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            values,
         )
 
 
 def read_usage_history():
+    if use_postgres_store():
+        initialize_postgres_schema()
+        with open_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT COUNT(*) AS calls,
+                           COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                           COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                           COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                           COALESCE(SUM(estimated_cost_usd), 0) AS estimated_cost_usd
+                    FROM ai_usage
+                    """
+                )
+                summary = cursor.fetchone()
+                cursor.execute(
+                    """
+                    SELECT created_at, model, input_tokens, output_tokens, total_tokens,
+                           elapsed_ms, estimated_cost_usd
+                    FROM ai_usage ORDER BY id DESC LIMIT 10
+                    """
+                )
+                recent = cursor.fetchall()
+        return {"summary": dict(summary), "recent": [dict(row) for row in recent]}
+
     with sqlite3.connect(DB_FILE) as connection:
         connection.row_factory = sqlite3.Row
         initialize_usage_db(connection)
@@ -361,7 +430,6 @@ def read_usage_history():
             """
         ).fetchall()
     return {"summary": dict(summary), "recent": [dict(row) for row in recent]}
-
 
 def split_document_into_chunks(content, max_characters=500):
     paragraphs = [paragraph.strip() for paragraph in content.split("\n\n") if paragraph.strip()]
@@ -387,8 +455,33 @@ def split_document_into_chunks(content, max_characters=500):
     return chunks
 
 
+def use_postgres_document_store():
+    """Backward-compatible name for document functions in this module."""
+    return use_postgres_store()
+
+
+def vector_literal(vector):
+    """Turn Python numbers into pgvector's [0.1,0.2] text format."""
+    return "[" + ",".join(str(float(value)) for value in vector) + "]"
+
+
 def save_document(original_name, content, chunks):
     created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    if use_postgres_document_store():
+        initialize_postgres_schema()
+        with open_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "INSERT INTO documents (original_name, content, created_at) VALUES (%s, %s, %s) RETURNING id",
+                    (original_name, content, created_at),
+                )
+                document_id = cursor.fetchone()["id"]
+                cursor.executemany(
+                    "INSERT INTO document_chunks (document_id, chunk_index, content) VALUES (%s, %s, %s)",
+                    [(document_id, index + 1, chunk) for index, chunk in enumerate(chunks)],
+                )
+        return document_id
+
     with sqlite3.connect(DB_FILE) as connection:
         initialize_usage_db(connection)
         cursor = connection.execute(
@@ -412,16 +505,29 @@ def search_document_chunks(query):
     if not terms:
         raise HTTPException(status_code=422, detail="두 글자 이상의 검색어를 입력해주세요.")
 
-    with sqlite3.connect(DB_FILE) as connection:
-        connection.row_factory = sqlite3.Row
-        initialize_usage_db(connection)
-        rows = connection.execute(
-            """
-            SELECT documents.original_name, document_chunks.chunk_index, document_chunks.content
-            FROM document_chunks
-            JOIN documents ON documents.id = document_chunks.document_id
-            """
-        ).fetchall()
+    if use_postgres_document_store():
+        initialize_postgres_schema()
+        with open_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT documents.original_name, document_chunks.chunk_index, document_chunks.content
+                    FROM document_chunks
+                    JOIN documents ON documents.id = document_chunks.document_id
+                    """
+                )
+                rows = cursor.fetchall()
+    else:
+        with sqlite3.connect(DB_FILE) as connection:
+            connection.row_factory = sqlite3.Row
+            initialize_usage_db(connection)
+            rows = connection.execute(
+                """
+                SELECT documents.original_name, document_chunks.chunk_index, document_chunks.content
+                FROM document_chunks
+                JOIN documents ON documents.id = document_chunks.document_id
+                """
+            ).fetchall()
 
     matches = []
     for row in rows:
@@ -458,16 +564,26 @@ def create_embeddings(texts):
 
 def index_document_embeddings(document_id):
     """Create and store one vector per already-saved document chunk."""
-    with sqlite3.connect(DB_FILE) as connection:
-        connection.row_factory = sqlite3.Row
-        initialize_usage_db(connection)
-        rows = connection.execute(
-            """
-            SELECT id, content FROM document_chunks
-            WHERE document_id = ? ORDER BY chunk_index
-            """,
-            (document_id,),
-        ).fetchall()
+    if use_postgres_document_store():
+        initialize_postgres_schema()
+        with open_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT id, content FROM document_chunks WHERE document_id = %s ORDER BY chunk_index",
+                    (document_id,),
+                )
+                rows = cursor.fetchall()
+    else:
+        with sqlite3.connect(DB_FILE) as connection:
+            connection.row_factory = sqlite3.Row
+            initialize_usage_db(connection)
+            rows = connection.execute(
+                """
+                SELECT id, content FROM document_chunks
+                WHERE document_id = ? ORDER BY chunk_index
+                """,
+                (document_id,),
+            ).fetchall()
 
     if not rows:
         raise HTTPException(status_code=404, detail="등록된 문서를 찾지 못했습니다.")
@@ -477,19 +593,38 @@ def index_document_embeddings(document_id):
         raise ValueError("문단 수와 임베딩 수가 다릅니다.")
 
     created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    with sqlite3.connect(DB_FILE) as connection:
-        initialize_usage_db(connection)
-        connection.executemany(
-            """
-            INSERT OR REPLACE INTO chunk_embeddings
-            (chunk_id, model, vector_json, dimensions, created_at)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            [
-                (row["id"], model, json.dumps(vector), len(vector), created_at)
-                for row, vector in zip(rows, vectors)
-            ],
-        )
+    if use_postgres_document_store():
+        with open_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.executemany(
+                    """
+                    INSERT INTO chunk_embeddings (chunk_id, model, embedding, dimensions, created_at)
+                    VALUES (%s, %s, %s::vector, %s, %s)
+                    ON CONFLICT (chunk_id) DO UPDATE SET
+                        model = EXCLUDED.model,
+                        embedding = EXCLUDED.embedding,
+                        dimensions = EXCLUDED.dimensions,
+                        created_at = EXCLUDED.created_at
+                    """,
+                    [
+                        (row["id"], model, vector_literal(vector), len(vector), created_at)
+                        for row, vector in zip(rows, vectors)
+                    ],
+                )
+    else:
+        with sqlite3.connect(DB_FILE) as connection:
+            initialize_usage_db(connection)
+            connection.executemany(
+                """
+                INSERT OR REPLACE INTO chunk_embeddings
+                (chunk_id, model, vector_json, dimensions, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                [
+                    (row["id"], model, json.dumps(vector), len(vector), created_at)
+                    for row, vector in zip(rows, vectors)
+                ],
+            )
     return {"document_id": document_id, "indexed_chunks": len(rows), "model": model}
 
 
@@ -509,6 +644,41 @@ def search_semantic_document_chunks(query):
     """Find chunks with the closest meaning, even when exact words differ."""
     model, query_vectors = create_embeddings([query])
     query_vector = query_vectors[0]
+
+    if use_postgres_document_store():
+        initialize_postgres_schema()
+        with open_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT documents.original_name, document_chunks.chunk_index, document_chunks.content,
+                           1 - (chunk_embeddings.embedding <=> %s::vector) AS score
+                    FROM chunk_embeddings
+                    JOIN document_chunks ON document_chunks.id = chunk_embeddings.chunk_id
+                    JOIN documents ON documents.id = document_chunks.document_id
+                    WHERE chunk_embeddings.model = %s
+                    ORDER BY chunk_embeddings.embedding <=> %s::vector,
+                             documents.original_name, document_chunks.chunk_index
+                    LIMIT 3
+                    """,
+                    (vector_literal(query_vector), model, vector_literal(query_vector)),
+                )
+                rows = cursor.fetchall()
+        if not rows:
+            raise HTTPException(
+                status_code=409,
+                detail="의미 검색 준비가 된 문서가 없습니다. 문서를 등록한 뒤 '의미 검색 준비'를 눌러주세요.",
+            )
+        matches = [
+            {
+                "document_name": row["original_name"],
+                "chunk_index": row["chunk_index"],
+                "content": row["content"],
+                "score": round(float(row["score"]), 4),
+            }
+            for row in rows
+        ]
+        return {"query": query, "terms": [], "mode": "semantic", "sources": matches}
 
     with sqlite3.connect(DB_FILE) as connection:
         connection.row_factory = sqlite3.Row
