@@ -1,5 +1,6 @@
 """First read-only web endpoint for the WorkBrief sales report."""
 
+from contextvars import ContextVar
 import csv
 import asyncio
 import sqlite3
@@ -12,8 +13,11 @@ import time
 from io import StringIO
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, HTTPException, UploadFile
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
+
+from auth import authenticate_user, create_access_token, current_user_from_token, register_user
 
 from main import calculate_sales, calculate_sales_rows
 from database import initialize_postgres_schema, open_connection
@@ -53,6 +57,20 @@ class AgentQuestionRequest(BaseModel):
     question: str
 
 
+class RegisterRequest(BaseModel):
+    email: str
+    display_name: str
+    password: str
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+bearer_scheme = HTTPBearer(auto_error=False)
+
+
 AGENT_TOOLS = [
     {
         "type": "function",
@@ -88,18 +106,57 @@ AGENT_TOOLS = [
 ]
 
 
-@app.get("/report")
+request_owner = ContextVar("request_owner", default=None)
+
+
+def owner_id():
+    value = request_owner.get()
+    if value is None:
+        raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
+    return value
+
+
+async def authenticated_owner(credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme)):
+    if credentials is None:
+        raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
+    user = await asyncio.to_thread(current_user_from_token, credentials.credentials)
+    token = request_owner.set(user["id"])
+    try:
+        yield
+    finally:
+        request_owner.reset(token)
+
+
+@app.post("/auth/register", status_code=201)
+def register(request: RegisterRequest):
+    return register_user(request.email, request.display_name, request.password)
+
+
+@app.post("/auth/login")
+def login(request: LoginRequest):
+    user = authenticate_user(request.email, request.password)
+    return {"access_token": create_access_token(user), "token_type": "bearer", "user": user}
+
+
+@app.get("/auth/me")
+def read_current_user(credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme)):
+    if credentials is None or credentials.scheme.casefold() != "bearer":
+        raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
+    return current_user_from_token(credentials.credentials)
+
+
+@app.get("/report", dependencies=[Depends(authenticated_owner)])
 def get_report():
     totals, warnings = calculate_sales(SALES_FILE)
     return build_report(totals, warnings)
 
 
-@app.get("/report/usage")
+@app.get("/report/usage", dependencies=[Depends(authenticated_owner)])
 def get_usage_history():
     return read_usage_history()
 
 
-@app.post("/documents/upload")
+@app.post("/documents/upload", dependencies=[Depends(authenticated_owner)])
 async def upload_document(file: UploadFile):
     allowed_extensions = (".txt", ".md")
     if not (file.filename or "").lower().endswith(allowed_extensions):
@@ -120,7 +177,7 @@ async def upload_document(file: UploadFile):
     return {"document_id": document_id, "filename": file.filename, "chunks": len(chunks)}
 
 
-@app.post("/documents/{document_id}/index")
+@app.post("/documents/{document_id}/index", dependencies=[Depends(authenticated_owner)])
 async def index_document(document_id: int):
     try:
         return await asyncio.to_thread(index_document_embeddings, document_id)
@@ -131,7 +188,7 @@ async def index_document(document_id: int):
         raise HTTPException(status_code=502, detail="의미 검색 준비에 실패했습니다. API 키와 네트워크를 확인해주세요.")
 
 
-@app.get("/documents/search")
+@app.get("/documents/search", dependencies=[Depends(authenticated_owner)])
 def search_documents(query: str, mode: str = "keyword"):
     if not query.strip():
         raise HTTPException(status_code=422, detail="질문을 입력해주세요.")
@@ -148,7 +205,7 @@ def search_documents(query: str, mode: str = "keyword"):
     raise HTTPException(status_code=422, detail="검색 방식은 keyword 또는 semantic만 사용할 수 있습니다.")
 
 
-@app.post("/documents/answer")
+@app.post("/documents/answer", dependencies=[Depends(authenticated_owner)])
 async def answer_documents(request: DocumentAnswerRequest):
     if not request.query.strip():
         raise HTTPException(status_code=422, detail="질문을 입력해주세요.")
@@ -161,12 +218,12 @@ async def answer_documents(request: DocumentAnswerRequest):
         raise HTTPException(status_code=502, detail="AI 답변 생성에 실패했습니다. API 키와 네트워크를 확인해주세요.")
 
 
-@app.get("/agent/traces")
+@app.get("/agent/traces", dependencies=[Depends(authenticated_owner)])
 def get_agent_traces():
     return read_agent_traces()
 
 
-@app.post("/agent/answer")
+@app.post("/agent/answer", dependencies=[Depends(authenticated_owner)])
 async def answer_with_agent(request: AgentQuestionRequest):
     if not request.question.strip():
         raise HTTPException(status_code=422, detail="업무 질문을 입력해주세요.")
@@ -181,7 +238,7 @@ async def answer_with_agent(request: AgentQuestionRequest):
         raise HTTPException(status_code=502, detail="업무 에이전트 호출에 실패했습니다. API 키와 네트워크를 확인해주세요.")
 
 
-@app.post("/report/upload")
+@app.post("/report/upload", dependencies=[Depends(authenticated_owner)])
 async def upload_report(file: UploadFile):
     if not (file.filename or "").lower().endswith(".csv"):
         raise HTTPException(status_code=415, detail="CSV 파일을 올려주세요.")
@@ -199,7 +256,7 @@ async def upload_report(file: UploadFile):
     return build_report(totals, warnings)
 
 
-@app.post("/report/upload/ai")
+@app.post("/report/upload/ai", dependencies=[Depends(authenticated_owner)])
 async def upload_ai_report(file: UploadFile):
     report = await upload_report(file)
     if not os.getenv("OPENAI_API_KEY"):
@@ -311,9 +368,9 @@ def save_agent_trace(result):
             with connection.cursor() as cursor:
                 cursor.execute(
                     """INSERT INTO agent_traces
-                    (created_at, tools_json, model, total_tokens, elapsed_ms, estimated_cost_usd)
-                    VALUES (%s, %s::jsonb, %s, %s, %s, %s)""",
-                    (created_at, json.dumps(tools), usage["model"], usage["total_tokens"], usage["elapsed_ms"], usage["estimated_cost_usd"]),
+                    (created_at, tools_json, model, total_tokens, elapsed_ms, estimated_cost_usd, owner_id)
+                    VALUES (%s, %s::jsonb, %s, %s, %s, %s, %s)""",
+                    (created_at, json.dumps(tools), usage["model"], usage["total_tokens"], usage["elapsed_ms"], usage["estimated_cost_usd"], owner_id()),
                 )
         return
 
@@ -333,11 +390,11 @@ def read_agent_traces():
         with open_connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "SELECT COUNT(*) AS calls, COALESCE(SUM(total_tokens), 0) AS total_tokens, COALESCE(SUM(estimated_cost_usd), 0) AS estimated_cost_usd FROM agent_traces"
+                    "SELECT COUNT(*) AS calls, COALESCE(SUM(total_tokens), 0) AS total_tokens, COALESCE(SUM(estimated_cost_usd), 0) AS estimated_cost_usd FROM agent_traces WHERE owner_id = %s", (owner_id(),)
                 )
                 summary = cursor.fetchone()
                 cursor.execute(
-                    "SELECT created_at, tools_json, model, total_tokens, elapsed_ms, estimated_cost_usd FROM agent_traces ORDER BY id DESC LIMIT 10"
+                    "SELECT created_at, tools_json, model, total_tokens, elapsed_ms, estimated_cost_usd FROM agent_traces WHERE owner_id = %s ORDER BY id DESC LIMIT 10", (owner_id(),)
                 )
                 recent = cursor.fetchall()
         return {"summary": dict(summary), "recent": [{**dict(row), "tools": row["tools_json"]} for row in recent]}
@@ -367,9 +424,9 @@ def save_usage(usage):
             with connection.cursor() as cursor:
                 cursor.execute(
                     """INSERT INTO ai_usage
-                    (created_at, model, input_tokens, output_tokens, total_tokens, elapsed_ms, estimated_cost_usd)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-                    values,
+                    (created_at, model, input_tokens, output_tokens, total_tokens, elapsed_ms, estimated_cost_usd, owner_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+                    (*values, owner_id()),
                 )
         return
 
@@ -395,16 +452,16 @@ def read_usage_history():
                            COALESCE(SUM(output_tokens), 0) AS output_tokens,
                            COALESCE(SUM(total_tokens), 0) AS total_tokens,
                            COALESCE(SUM(estimated_cost_usd), 0) AS estimated_cost_usd
-                    FROM ai_usage
-                    """
+                    FROM ai_usage WHERE owner_id = %s
+                    """, (owner_id(),)
                 )
                 summary = cursor.fetchone()
                 cursor.execute(
                     """
                     SELECT created_at, model, input_tokens, output_tokens, total_tokens,
                            elapsed_ms, estimated_cost_usd
-                    FROM ai_usage ORDER BY id DESC LIMIT 10
-                    """
+                    FROM ai_usage WHERE owner_id = %s ORDER BY id DESC LIMIT 10
+                    """, (owner_id(),)
                 )
                 recent = cursor.fetchall()
         return {"summary": dict(summary), "recent": [dict(row) for row in recent]}
@@ -472,8 +529,8 @@ def save_document(original_name, content, chunks):
         with open_connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "INSERT INTO documents (original_name, content, created_at) VALUES (%s, %s, %s) RETURNING id",
-                    (original_name, content, created_at),
+                    "INSERT INTO documents (original_name, content, created_at, owner_id) VALUES (%s, %s, %s, %s) RETURNING id",
+                    (original_name, content, created_at, owner_id()),
                 )
                 document_id = cursor.fetchone()["id"]
                 cursor.executemany(
@@ -514,7 +571,8 @@ def search_document_chunks(query):
                     SELECT documents.original_name, document_chunks.chunk_index, document_chunks.content
                     FROM document_chunks
                     JOIN documents ON documents.id = document_chunks.document_id
-                    """
+                    WHERE documents.owner_id = %s
+                    """, (owner_id(),)
                 )
                 rows = cursor.fetchall()
     else:
@@ -569,8 +627,8 @@ def index_document_embeddings(document_id):
         with open_connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "SELECT id, content FROM document_chunks WHERE document_id = %s ORDER BY chunk_index",
-                    (document_id,),
+                    "SELECT id, content FROM document_chunks WHERE document_id = %s AND EXISTS (SELECT 1 FROM documents WHERE documents.id = document_id AND owner_id = %s) ORDER BY chunk_index",
+                    (document_id, owner_id()),
                 )
                 rows = cursor.fetchall()
     else:
@@ -656,12 +714,12 @@ def search_semantic_document_chunks(query):
                     FROM chunk_embeddings
                     JOIN document_chunks ON document_chunks.id = chunk_embeddings.chunk_id
                     JOIN documents ON documents.id = document_chunks.document_id
-                    WHERE chunk_embeddings.model = %s
+                    WHERE chunk_embeddings.model = %s AND documents.owner_id = %s AND chunk_embeddings.dimensions = %s
                     ORDER BY chunk_embeddings.embedding <=> %s::vector,
                              documents.original_name, document_chunks.chunk_index
                     LIMIT 3
                     """,
-                    (vector_literal(query_vector), model, vector_literal(query_vector)),
+                    (vector_literal(query_vector), model, owner_id(), len(query_vector), vector_literal(query_vector)),
                 )
                 rows = cursor.fetchall()
         if not rows:

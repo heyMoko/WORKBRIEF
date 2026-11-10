@@ -44,6 +44,15 @@ def initialize_postgres_schema():
     statements = [
         "CREATE EXTENSION IF NOT EXISTS vector",
         """
+        CREATE TABLE IF NOT EXISTS users (
+            id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            email TEXT NOT NULL UNIQUE,
+            display_name TEXT NOT NULL,
+            password_hash TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL
+        )
+        """,
+        """
         CREATE TABLE IF NOT EXISTS legacy_imports (
             source_name TEXT PRIMARY KEY,
             completed_at TIMESTAMPTZ NOT NULL
@@ -99,6 +108,9 @@ def initialize_postgres_schema():
         )
         """,
     ]
+    for table in ("documents", "ai_usage", "agent_traces"):
+        statements.append(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS owner_id BIGINT REFERENCES users(id)")
+        statements.append(f"CREATE INDEX IF NOT EXISTS {table}_owner_idx ON {table}(owner_id)")
     with open_connection() as connection:
         with connection.cursor() as cursor:
             for statement in statements:

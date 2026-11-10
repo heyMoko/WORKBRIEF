@@ -13,6 +13,19 @@ os.environ["WORKBRIEF_DOCUMENT_STORE"] = "sqlite"
 import api
 
 
+@pytest.fixture(autouse=True)
+def authenticated_unit_client():
+    async def fake_auth():
+        token = api.request_owner.set(1)
+        try:
+            yield
+        finally:
+            api.request_owner.reset(token)
+    api.app.dependency_overrides[api.authenticated_owner] = fake_auth
+    yield
+    api.app.dependency_overrides.pop(api.authenticated_owner, None)
+
+
 client = TestClient(api.app)
 
 
