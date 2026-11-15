@@ -225,8 +225,10 @@ async def upload_document(file: UploadFile):
 
 @app.post("/documents/{document_id}/index", dependencies=[Depends(authenticated_owner)])
 async def queue_document_index(document_id: int):
-    """Retry a failed job without making the HTTP request wait for OpenAI."""
+    """Queue production work; keep SQLite unit tests free from Redis and paid services."""
     try:
+        if not use_postgres_document_store():
+            return await asyncio.to_thread(index_document_embeddings, document_id)
         status = get_document_index_status(document_id, owner_id())
         if status["index_status"] == "ready":
             return status
