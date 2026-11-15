@@ -189,6 +189,20 @@ def list_documents():
     ]}
 
 
+@app.delete("/documents/{document_id}", dependencies=[Depends(authenticated_owner)])
+def delete_document(document_id: int):
+    """Delete only the current user's document; PostgreSQL cascades to chunks and vectors."""
+    if not use_postgres_document_store():
+        raise HTTPException(status_code=501, detail="문서 삭제는 PostgreSQL 환경에서 사용할 수 있습니다.")
+    initialize_postgres_schema()
+    with open_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("DELETE FROM documents WHERE id = %s AND owner_id = %s RETURNING id", (document_id, owner_id()))
+            if cursor.fetchone() is None:
+                raise HTTPException(status_code=404, detail="문서를 찾을 수 없습니다.")
+    return {"deleted": True}
+
+
 @app.post("/documents/upload", dependencies=[Depends(authenticated_owner)])
 async def upload_document(file: UploadFile):
     allowed_extensions = (".txt", ".md")

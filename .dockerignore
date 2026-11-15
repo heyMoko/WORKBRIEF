@@ -1,0 +1,9 @@
+**
+!requirements.txt
+!api.py
+!auth.py
+!database.py
+!document_jobs.py
+!main.py
+!worker.py
+!sales.csv

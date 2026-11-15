@@ -152,6 +152,17 @@ export default function Home() {
     } finally { setDocumentsLoading(false); }
   }
 
+  async function deleteStoredDocument(document: StoredDocument) {
+    if (!window.confirm(`'${document.filename}' (번호 ${document.document_id}) 문서를 삭제할까요? 문서 조각과 AI 검색 데이터도 삭제됩니다.`)) return;
+    try {
+      const response = await authenticatedFetch(`/api/documents/${document.document_id}`, { method: "DELETE" });
+      if (!response.ok) { const data = await response.json() as ApiError; setDocumentError(errorMessage(data, "문서 삭제에 실패했어요.")); return; }
+      if (documentId === document.document_id) { setDocumentId(null); setDocumentIndex(null); setSearchMode("keyword"); setDocumentSearch(null); setDocumentAnswer(null); }
+      setDocumentError(""); setDocumentStatus("문서를 삭제했어요.");
+      await refreshDocuments();
+    } catch { setDocumentError("문서 삭제 중 연결 문제가 생겼어요."); }
+  }
+
   function selectStoredDocument(document: StoredDocument) {
     setDocumentId(document.document_id);
     setDocumentIndex(document);
@@ -564,7 +575,7 @@ export default function Home() {
             </div>
             <div className="mt-5 rounded-xl border border-slate-200 bg-slate-50 p-4">
               <div className="flex items-center justify-between gap-3"><p className="text-sm font-semibold">내 업무 문서</p><button type="button" onClick={refreshDocuments} disabled={documentsLoading} className="text-xs font-semibold text-emerald-700">{documentsLoading ? "불러오는 중..." : "목록 새로고침"}</button></div>
-              {storedDocuments.length === 0 ? <p className="mt-2 text-xs text-slate-500">아직 등록한 문서가 없어요.</p> : <ul className="mt-3 space-y-2">{storedDocuments.map((document) => <li key={document.document_id}><button type="button" onClick={() => selectStoredDocument(document)} className={`flex w-full items-center justify-between rounded-lg border px-3 py-2 text-left text-sm ${documentId === document.document_id ? "border-emerald-500 bg-emerald-50" : "border-slate-200 bg-white"}`}><span className="truncate font-medium">{document.filename}</span><span className={`ml-3 shrink-0 text-xs font-semibold ${document.index_status === "ready" ? "text-emerald-700" : document.index_status === "failed" ? "text-rose-700" : "text-amber-700"}`}>{document.index_status === "ready" ? "AI 준비 완료" : document.index_status === "failed" ? "준비 실패" : "AI 준비 중"}</span></button></li>)}</ul>}
+              {storedDocuments.length === 0 ? <p className="mt-2 text-xs text-slate-500">아직 등록한 문서가 없어요.</p> : <ul className="mt-3 space-y-2">{storedDocuments.map((document) => <li key={document.document_id} className="flex gap-2"><button type="button" onClick={() => selectStoredDocument(document)} className={`flex min-w-0 flex-1 items-center justify-between rounded-lg border px-3 py-2 text-left text-sm ${documentId === document.document_id ? "border-emerald-500 bg-emerald-50" : "border-slate-200 bg-white"}`}><span className="min-w-0"><span className="block truncate font-medium">{document.filename}</span><span className="block text-xs text-slate-400">번호 {document.document_id} · {new Date(document.created_at).toLocaleString("ko-KR")}</span></span><span className={`ml-3 shrink-0 text-xs font-semibold ${document.index_status === "ready" ? "text-emerald-700" : document.index_status === "failed" ? "text-rose-700" : "text-amber-700"}`}>{document.index_status === "ready" ? "AI 준비 완료" : document.index_status === "failed" ? "준비 실패" : "AI 준비 중"}</span></button><button type="button" onClick={() => deleteStoredDocument(document)} className="rounded-lg border border-slate-400 px-3 text-sm text-slate-700" aria-label={`${document.filename} 번호 ${document.document_id} 삭제`}>삭제</button></li>)}</ul>}
             </div>
           </form>
           <form onSubmit={searchDocument} className="mt-6">
