@@ -86,7 +86,11 @@ def initialize_postgres_schema():
             id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             original_name TEXT NOT NULL,
             content TEXT NOT NULL,
-            created_at TIMESTAMPTZ NOT NULL
+            created_at TIMESTAMPTZ NOT NULL,
+            index_status TEXT NOT NULL DEFAULT 'queued',
+            index_error TEXT,
+            index_job_id TEXT,
+            indexed_at TIMESTAMPTZ
         )
         """,
         """
@@ -108,6 +112,13 @@ def initialize_postgres_schema():
         )
         """,
     ]
+    statements.extend([
+        "ALTER TABLE documents ADD COLUMN IF NOT EXISTS index_status TEXT NOT NULL DEFAULT 'queued'",
+        "ALTER TABLE documents ADD COLUMN IF NOT EXISTS index_error TEXT",
+        "ALTER TABLE documents ADD COLUMN IF NOT EXISTS index_job_id TEXT",
+        "ALTER TABLE documents ADD COLUMN IF NOT EXISTS indexed_at TIMESTAMPTZ",
+        "CREATE INDEX IF NOT EXISTS documents_owner_status_idx ON documents(owner_id, index_status)",
+    ])
     for table in ("documents", "ai_usage", "agent_traces"):
         statements.append(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS owner_id BIGINT REFERENCES users(id)")
         statements.append(f"CREATE INDEX IF NOT EXISTS {table}_owner_idx ON {table}(owner_id)")

@@ -17,8 +17,9 @@ type UsageHistory = {
   summary: { calls: number; total_tokens: number; estimated_cost_usd: number };
   recent: Array<AIUsage & { created_at: string }>;
 };
-type DocumentUpload = { document_id: number; filename: string; chunks: number };
-type DocumentIndex = { document_id: number; indexed_chunks: number; model: string };
+type DocumentUpload = { document_id: number; filename: string; chunks: number; index_status: "queued" | "not_queued"; job_id?: string };
+type DocumentIndexStatus = { document_id: number; filename?: string; index_status: "queued" | "processing" | "ready" | "failed" | "not_queued"; index_error: string | null; indexed_at?: string | null };
+type StoredDocument = DocumentIndexStatus & { index_job_id?: string | null; created_at: string };
 type DocumentSource = {
   document_name: string;
   chunk_index: number;
@@ -76,6 +77,9 @@ export default function Home() {
   const [documentError, setDocumentError] = useState("");
   const [documentLoading, setDocumentLoading] = useState(false);
   const [documentId, setDocumentId] = useState<number | null>(null);
+  const [documentIndex, setDocumentIndex] = useState<DocumentIndexStatus | null>(null);
+  const [storedDocuments, setStoredDocuments] = useState<StoredDocument[]>([]);
+  const [documentsLoading, setDocumentsLoading] = useState(false);
   const [searchMode, setSearchMode] = useState<"keyword" | "semantic">("keyword");
   const [question, setQuestion] = useState("");
   const [documentSearch, setDocumentSearch] = useState<DocumentSearch | null>(null);
@@ -101,6 +105,11 @@ export default function Home() {
       .catch(() => sessionStorage.removeItem("workbrief_access_token"));
   }, []);
 
+  useEffect(() => {
+    if (user) refreshDocuments();
+    else setStoredDocuments([]);
+  }, [user]);
+
   async function submitAuth(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setAuthLoading(true); setAuthError("");
@@ -121,7 +130,7 @@ export default function Home() {
     finally { setAuthLoading(false); }
   }
 
-  function logout() { sessionStorage.removeItem("workbrief_access_token"); setUser(null); setDocumentSearch(null); setDocumentAnswer(null); setAgentAnswer(null); setAgentHistory(null); setUsageHistory(null); setReport(null); setDraft(""); setDocumentId(null); setDocumentStatus(""); }
+  function logout() { sessionStorage.removeItem("workbrief_access_token"); setUser(null); setDocumentSearch(null); setDocumentAnswer(null); setAgentAnswer(null); setAgentHistory(null); setUsageHistory(null); setReport(null); setDraft(""); setDocumentId(null); setDocumentIndex(null); setDocumentStatus(""); }
 
   async function refreshUsageHistory() {
     try {
@@ -130,6 +139,27 @@ export default function Home() {
     } catch {
       // 통계 화면을 불러오지 못해도 CSV 분석과 초안 작성은 계속 쓸 수 있다.
     }
+  }
+
+  async function refreshDocuments() {
+    setDocumentsLoading(true);
+    try {
+      const response = await authenticatedFetch("/api/documents", { cache: "no-store" });
+      if (response.ok) {
+        const data = await response.json() as { documents: StoredDocument[] };
+        setStoredDocuments(data.documents);
+      }
+    } finally { setDocumentsLoading(false); }
+  }
+
+  function selectStoredDocument(document: StoredDocument) {
+    setDocumentId(document.document_id);
+    setDocumentIndex(document);
+    setDocumentError("");
+    setDocumentStatus(document.index_status === "ready"
+      ? `'${document.filename}' 문서는 AI 의미 검색 준비가 끝났어요.`
+      : `'${document.filename}' 문서를 선택했어요. 현재 상태: ${document.index_status}.`);
+    if (document.index_status === "ready") setSearchMode("semantic");
   }
 
   function chooseFile(event: ChangeEvent<HTMLInputElement>) {
@@ -146,6 +176,7 @@ export default function Home() {
     setDocumentStatus("");
     setDocumentError("");
     setDocumentId(null);
+    setDocumentIndex(null);
     setDocumentSearch(null);
     setDocumentAnswer(null);
   }
@@ -169,9 +200,13 @@ export default function Home() {
       }
       const result = data as DocumentUpload;
       setDocumentId(result.document_id);
-      setDocumentStatus(`'${result.filename}' 문서를 ${result.chunks}개 조각으로 등록했어요. 키워드 검색은 바로 쓸 수 있어요.`);
+      setDocumentIndex({ document_id: result.document_id, filename: result.filename, index_status: result.index_status, index_error: null });
+      setDocumentStatus(result.index_status === "queued"
+        ? `'${result.filename}' 문서를 ${result.chunks}개 조각으로 등록했어요. AI 의미 검색은 뒤에서 준비 중이고, 단어 검색은 지금 바로 쓸 수 있어요.`
+        : `'${result.filename}' 문서를 ${result.chunks}개 조각으로 등록했어요. 단어 검색은 지금 바로 쓸 수 있어요.`);
       setDocumentSearch(null);
       setDocumentAnswer(null);
+      await refreshDocuments();
     } catch {
       setDocumentError("문서 등록 중 연결 문제가 생겼어요.");
     } finally {
@@ -244,48 +279,93 @@ export default function Home() {
     }
     setDocumentLoading(true);
     setDocumentError("");
+    setDocumentSearch(null);
+    // Make an empty speech bubble first, so the user can see the answer arriving.
+    setDocumentAnswer({ query: question, mode: searchMode, answer: "", citations: [], sources: [], usage: null });
     try {
-      const response = await authenticatedFetch("/api/documents/answer", {
+      const response = await authenticatedFetch("/api/documents/answer/stream", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
         body: JSON.stringify({ query: question, mode: searchMode }),
       });
-      const data: DocumentAnswer | ApiError = await response.json();
-      if (!response.ok) {
-        setDocumentError(errorMessage(data as ApiError, "AI 답변 생성에 실패했어요."));
+      if (!response.ok || !response.body) {
+        const data: ApiError = await response.json();
+        setDocumentAnswer(null);
+        setDocumentError(errorMessage(data, "AI 답변 생성에 실패했어요."));
         return;
       }
-      setDocumentAnswer(data as DocumentAnswer);
-      setDocumentSearch(null);
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let receivedError = false;
+      while (true) {
+        const { done, value } = await reader.read();
+        buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+        const messages = buffer.split("\n\n");
+        buffer = messages.pop() ?? "";
+        for (const message of messages) {
+          const eventName = message.match(/^event: (.+)$/m)?.[1];
+          const dataLine = message.match(/^data: (.+)$/m)?.[1];
+          if (!eventName || !dataLine) continue;
+          const data = JSON.parse(dataLine) as { text?: string; detail?: string } & DocumentAnswer;
+          if (eventName === "delta" && data.text) {
+            setDocumentAnswer((current) => current ? { ...current, answer: current.answer + data.text } : current);
+          }
+          if (eventName === "done") setDocumentAnswer(data as DocumentAnswer);
+          if (eventName === "error") {
+            receivedError = true;
+            setDocumentAnswer(null);
+            setDocumentError(data.detail ?? "AI 답변 생성에 실패했어요.");
+          }
+        }
+        if (done) break;
+      }
+      if (!receivedError) await refreshUsageHistory();
     } catch {
-      setDocumentError("AI 답변 생성 중 연결 문제가 생겼어요.");
+      setDocumentAnswer(null);
+      setDocumentError("AI 답변을 받는 중 연결 문제가 생겼어요.");
     } finally {
       setDocumentLoading(false);
     }
   }
 
-  async function indexDocument() {
-    if (!documentId) {
-      setDocumentError("먼저 문서를 등록해주세요.");
-      return;
-    }
+  async function refreshDocumentIndex() {
+    if (!documentId) return;
     setDocumentLoading(true);
     setDocumentError("");
     try {
-      const response = await authenticatedFetch(`/api/documents/${documentId}/index`, { method: "POST" });
-      const data: DocumentIndex | ApiError = await response.json();
-      if (!response.ok) {
-        setDocumentError(errorMessage(data as ApiError, "의미 검색 준비에 실패했어요."));
-        return;
+      const response = await authenticatedFetch(`/api/documents/${documentId}/status`, { cache: "no-store" });
+      const data: DocumentIndexStatus | ApiError = await response.json();
+      if (!response.ok) { setDocumentError(errorMessage(data as ApiError, "AI 준비 상태를 불러오지 못했어요.")); return; }
+      const result = data as DocumentIndexStatus;
+      setDocumentIndex(result);
+      await refreshDocuments();
+      if (result.index_status === "ready") {
+        setSearchMode("semantic");
+        setDocumentStatus("AI 의미 검색 준비가 끝났어요. 이제 표현이 달라도 비슷한 뜻을 찾아볼 수 있어요.");
+      } else if (result.index_status === "failed") {
+        setDocumentError(result.index_error ?? "AI 의미 검색 준비에 실패했어요. 다시 요청해주세요.");
+      } else {
+        setDocumentStatus(result.index_status === "processing" ? "AI가 문서 뜻을 읽고 있어요. 잠시 뒤 상태를 새로고침해주세요." : "AI 의미 검색을 준비하기 위해 대기열에 넣었어요. 잠시 뒤 상태를 새로고침해주세요.");
       }
-      const result = data as DocumentIndex;
-      setSearchMode("semantic");
-      setDocumentStatus(`${result.indexed_chunks}개 문단 조각을 의미 좌표로 저장했어요. 이제 의미 검색을 사용할 수 있어요.`);
-    } catch {
-      setDocumentError("의미 검색 준비 중 연결 문제가 생겼어요.");
-    } finally {
-      setDocumentLoading(false);
-    }
+    } catch { setDocumentError("AI 준비 상태를 확인하는 중 연결 문제가 생겼어요."); }
+    finally { setDocumentLoading(false); }
+  }
+
+  async function indexDocument() {
+    if (!documentId) { setDocumentError("먼저 문서를 등록해주세요."); return; }
+    setDocumentLoading(true); setDocumentError("");
+    try {
+      const response = await authenticatedFetch(`/api/documents/${documentId}/index`, { method: "POST" });
+      const data: DocumentIndexStatus | ApiError = await response.json();
+      if (!response.ok) { setDocumentError(errorMessage(data as ApiError, "AI 준비 재요청에 실패했어요.")); return; }
+      const result = data as DocumentIndexStatus;
+      setDocumentIndex(result);
+      await refreshDocuments();
+      setDocumentStatus(result.index_status === "ready" ? "이미 AI 의미 검색 준비가 끝난 문서예요." : "AI 의미 검색을 다시 대기열에 넣었어요. 잠시 뒤 상태를 새로고침해주세요.");
+    } catch { setDocumentError("AI 준비 재요청 중 연결 문제가 생겼어요."); }
+    finally { setDocumentLoading(false); }
   }
 
   async function upload(event: FormEvent<HTMLFormElement>) {
@@ -468,20 +548,30 @@ export default function Home() {
             <label htmlFor="manual-file" className="block text-sm font-semibold">업무 매뉴얼 등록</label>
             <input id="manual-file" type="file" accept=".txt,.md,text/plain,text/markdown" onChange={chooseDocument}
               className="mt-3 block w-full cursor-pointer rounded-lg border border-slate-200 p-2 text-sm file:mr-4 file:cursor-pointer file:rounded-md file:border-0 file:bg-emerald-50 file:px-4 file:py-2 file:font-semibold file:text-emerald-700" />
-            <button type="submit" disabled={documentLoading || !documentFile}
-              className="mt-3 rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-emerald-700 disabled:bg-slate-300">
-              {documentLoading ? "등록 중..." : "문서 등록"}
-            </button>
-            <button type="button" onClick={indexDocument} disabled={documentLoading || !documentId}
-              className="mt-3 ml-3 rounded-lg border border-violet-600 px-4 py-2.5 text-sm font-semibold text-violet-700 hover:bg-violet-50 disabled:border-slate-300 disabled:text-slate-400">
-              의미 검색 준비 (AI)
-            </button>
+            <div className="mt-3 flex flex-wrap gap-3">
+              <button type="submit" disabled={documentLoading || !documentFile}
+                className="rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-emerald-700 disabled:bg-slate-300">
+                {documentLoading ? "등록 중..." : "문서 등록 후 AI 준비"}
+              </button>
+              <button type="button" onClick={refreshDocumentIndex} disabled={documentLoading || !documentId}
+                className="rounded-lg border border-slate-400 px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:border-slate-300 disabled:text-slate-400">
+                AI 준비 상태 새로고침
+              </button>
+              {documentIndex && documentIndex.index_status !== "ready" && <button type="button" onClick={indexDocument} disabled={documentLoading}
+                className="rounded-lg border border-violet-600 px-4 py-2.5 text-sm font-semibold text-violet-700 hover:bg-violet-50 disabled:border-slate-300 disabled:text-slate-400">
+                AI 준비 다시 요청
+              </button>}
+            </div>
+            <div className="mt-5 rounded-xl border border-slate-200 bg-slate-50 p-4">
+              <div className="flex items-center justify-between gap-3"><p className="text-sm font-semibold">내 업무 문서</p><button type="button" onClick={refreshDocuments} disabled={documentsLoading} className="text-xs font-semibold text-emerald-700">{documentsLoading ? "불러오는 중..." : "목록 새로고침"}</button></div>
+              {storedDocuments.length === 0 ? <p className="mt-2 text-xs text-slate-500">아직 등록한 문서가 없어요.</p> : <ul className="mt-3 space-y-2">{storedDocuments.map((document) => <li key={document.document_id}><button type="button" onClick={() => selectStoredDocument(document)} className={`flex w-full items-center justify-between rounded-lg border px-3 py-2 text-left text-sm ${documentId === document.document_id ? "border-emerald-500 bg-emerald-50" : "border-slate-200 bg-white"}`}><span className="truncate font-medium">{document.filename}</span><span className={`ml-3 shrink-0 text-xs font-semibold ${document.index_status === "ready" ? "text-emerald-700" : document.index_status === "failed" ? "text-rose-700" : "text-amber-700"}`}>{document.index_status === "ready" ? "AI 준비 완료" : document.index_status === "failed" ? "준비 실패" : "AI 준비 중"}</span></button></li>)}</ul>}
+            </div>
           </form>
           <form onSubmit={searchDocument} className="mt-6">
             <label htmlFor="document-question" className="block text-sm font-semibold">매뉴얼에 질문하기</label>
             <div className="mt-3 flex flex-wrap gap-4 text-sm text-slate-700">
               <label className="flex items-center gap-2"><input type="radio" name="search-mode" checked={searchMode === "keyword"} onChange={() => setSearchMode("keyword")} /> 단어 검색</label>
-              <label className="flex items-center gap-2"><input type="radio" name="search-mode" checked={searchMode === "semantic"} onChange={() => setSearchMode("semantic")} /> 의미 검색 (AI)</label>
+              <label className="flex items-center gap-2"><input type="radio" name="search-mode" checked={searchMode === "semantic"} disabled={documentIndex?.index_status !== "ready"} onChange={() => setSearchMode("semantic")} /> 의미 검색 (AI) {documentIndex?.index_status !== "ready" && <span className="text-xs text-slate-400">준비 중</span>}</label>
             </div>
             <div className="mt-3 flex flex-col gap-3 sm:flex-row">
               <input id="document-question" value={question} onChange={(event) => setQuestion(event.target.value)}
@@ -493,16 +583,16 @@ export default function Home() {
               </button>
               <button type="button" onClick={createDocumentAnswer} disabled={documentLoading}
                 className="rounded-lg bg-violet-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-violet-700 disabled:bg-slate-300">
-                {documentLoading ? "답변 생성 중..." : "AI 답변 만들기"}
+                {documentLoading ? "AI가 답변을 보내는 중..." : "AI 답변 만들기"}
               </button>
             </div>
           </form>
           {documentStatus && <p className="mt-4 rounded-lg bg-emerald-50 p-3 text-sm text-emerald-800">{documentStatus}</p>}
           {documentError && <p role="alert" className="mt-4 rounded-lg bg-rose-50 p-3 text-sm text-rose-700">{documentError}</p>}
           {documentAnswer && (
-            <section className="mt-5 rounded-xl border border-violet-200 bg-violet-50 p-5">
+            <section aria-live="polite" className="mt-5 rounded-xl border border-violet-200 bg-violet-50 p-5">
               <p className="text-xs font-semibold text-violet-700">AI 답변 · {documentAnswer.mode === "semantic" ? "의미 검색" : "단어 검색"} 근거 사용</p>
-              <p className="mt-2 whitespace-pre-wrap leading-7 text-slate-800">{documentAnswer.answer}</p>
+              <p className="mt-2 whitespace-pre-wrap leading-7 text-slate-800">{documentAnswer.answer || "AI가 근거를 읽고 답변을 쓰는 중이에요..."}</p>
               {documentAnswer.usage && (
                 <p className="mt-3 text-xs text-slate-500">{documentAnswer.usage.total_tokens.toLocaleString("ko-KR")} 토큰 · 예상 비용 ${(documentAnswer.usage.estimated_cost_usd ?? 0).toFixed(6)}</p>
               )}

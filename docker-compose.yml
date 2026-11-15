@@ -1,4 +1,18 @@
 services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - workbrief_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   postgres:
     image: pgvector/pgvector:pg16
     restart: unless-stopped
@@ -18,4 +32,5 @@ services:
       retries: 10
 
 volumes:
+  workbrief_redis_data:
   workbrief_postgres_data:
