@@ -62,6 +62,50 @@ jobs:
       - name: Test Redis recovery
         run: python -m pytest -q test_redis_integration.py
 
+  stack-integration:
+    name: PostgreSQL and Redis integration
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: workbrief
+          POSTGRES_PASSWORD: test-password-only
+          POSTGRES_DB: workbrief_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U workbrief -d workbrief_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      WORKBRIEF_TEST_STACK: "1"
+      POSTGRES_USER: workbrief
+      POSTGRES_PASSWORD: test-password-only
+      POSTGRES_DB: workbrief_test
+      POSTGRES_HOST: 127.0.0.1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Test document indexing and search
+        run: python -m pytest -q test_stack_integration.py
+
   frontend-build:
     name: Next.js build
     runs-on: ubuntu-latest

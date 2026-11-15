@@ -117,11 +117,11 @@ def initialize_postgres_schema():
         "ALTER TABLE documents ADD COLUMN IF NOT EXISTS index_error TEXT",
         "ALTER TABLE documents ADD COLUMN IF NOT EXISTS index_job_id TEXT",
         "ALTER TABLE documents ADD COLUMN IF NOT EXISTS indexed_at TIMESTAMPTZ",
-        "CREATE INDEX IF NOT EXISTS documents_owner_status_idx ON documents(owner_id, index_status)",
     ])
     for table in ("documents", "ai_usage", "agent_traces"):
         statements.append(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS owner_id BIGINT REFERENCES users(id)")
         statements.append(f"CREATE INDEX IF NOT EXISTS {table}_owner_idx ON {table}(owner_id)")
+    statements.append("CREATE INDEX IF NOT EXISTS documents_owner_status_idx ON documents(owner_id, index_status)")
     with open_connection() as connection:
         with connection.cursor() as cursor:
             for statement in statements:
