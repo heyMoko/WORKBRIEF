@@ -1,54 +1,74 @@
-"""Windows-compatible WorkBrief worker. Run: python worker.py"""
-
+"""WorkBrief single-worker queue with recovery after a process restart."""
 import json
 import time
 
 from redis.exceptions import ConnectionError as RedisConnectionError, TimeoutError as RedisTimeoutError
 from document_jobs import MAX_ATTEMPTS, QUEUE_NAME, process_document_index, redis_connection
 
+PROCESSING_QUEUE = QUEUE_NAME + ':processing'
 
-def retry_or_mark_failed(connection, job, error):
-    """Retry a temporary failure twice; keep the user-facing status honest."""
-    attempt = job["attempt"]
-    print(f"[Worker] 문서 {job['document_id']} 처리 실패 ({attempt}/{MAX_ATTEMPTS}): {type(error).__name__}: {error}")
-    if attempt < MAX_ATTEMPTS:
-        job["attempt"] += 1
-        time.sleep(3 * attempt)
-        connection.lpush(QUEUE_NAME, json.dumps(job))
-        print(f"[Worker] 다시 대기열에 넣었습니다: 문서 {job['document_id']}")
+
+def recover_interrupted_jobs(connection):
+    """Return interrupted work to the waiting queue, one atomic move at a time."""
+    count = 0
+    while connection.rpoplpush(PROCESSING_QUEUE, QUEUE_NAME) is not None:
+        count += 1
+    return count
+
+
+def process_one(connection, raw_job):
+    """Acknowledge only after success; queue retry and remove old job atomically."""
+    try:
+        job = json.loads(raw_job)
+        document_id = int(job['document_id'])
+        owner_id = int(job['owner_id'])
+        attempt = int(job.get('attempt', 1))
+    except (ValueError, TypeError, KeyError):
+        print('[Worker] 잘못된 작업을 제외했습니다.', flush=True)
+        connection.lrem(PROCESSING_QUEUE, 1, raw_job)
+        return
+    print(f'[Worker] 문서 {document_id} 처리 시작 (시도 {attempt})', flush=True)
+    try:
+        result = process_document_index(document_id, owner_id)
+    except Exception as error:
+        # Log only the exception class: network errors may contain API keys.
+        print(f'[Worker] 처리 실패: {type(error).__name__}', flush=True)
+        if attempt < MAX_ATTEMPTS:
+            job['attempt'] = attempt + 1
+            time.sleep(3 * attempt)
+            with connection.pipeline(transaction=True) as pipe:
+                pipe.lpush(QUEUE_NAME, json.dumps(job))
+                pipe.lrem(PROCESSING_QUEUE, 1, raw_job)
+                pipe.execute()
+        else:
+            connection.lrem(PROCESSING_QUEUE, 1, raw_job)
+        return
+    connection.lrem(PROCESSING_QUEUE, 1, raw_job)
+    print(f"[Worker] 완료: 문서 {document_id} · {result['indexed_chunks']}개 문단", flush=True)
 
 
 def run_worker():
     connection = redis_connection()
     connection.ping()
-    print(f"[Worker] Redis에 연결됐어요. '{QUEUE_NAME}' 대기열을 기다립니다. Ctrl+C로 종료합니다.")
-
+    recovered = recover_interrupted_jobs(connection)
+    print(f'[Worker] 연결 완료. 중단된 작업 {recovered}개 복구. 대기 중...', flush=True)
     while True:
         try:
-            # timeout=0 means wait forever. This is a normal idle state, not an error.
-            queued_item = connection.brpop(QUEUE_NAME, timeout=0)
-        except RedisTimeoutError:
-            # Some Windows socket setups still impose a read timeout. Keep waiting quietly.
-            continue
-        except RedisConnectionError as error:
-            print(f"[Worker] Redis 연결이 끊겼어요: {error}. 3초 뒤 다시 연결합니다.")
+            raw_job = connection.brpoplpush(QUEUE_NAME, PROCESSING_QUEUE, timeout=5)
+            if raw_job is not None:
+                process_one(connection, raw_job)
+        except (RedisConnectionError, RedisTimeoutError):
+            print('[Worker] Redis 연결 중단. 3초 뒤 재연결합니다.', flush=True)
             time.sleep(3)
             connection = redis_connection()
-            continue
-        if queued_item is None:
-            continue
-        _, raw_job = queued_item
-        job = json.loads(raw_job)
-        print(f"[Worker] 문서 {job['document_id']} AI 의미 검색 준비를 시작합니다.")
-        try:
-            result = process_document_index(job["document_id"], job["owner_id"])
-            print(f"[Worker] 완료: 문서 {job['document_id']} · {result['indexed_chunks']}개 문단")
-        except Exception as error:
-            retry_or_mark_failed(connection, job, error)
+            try:
+                recover_interrupted_jobs(connection)
+            except (RedisConnectionError, RedisTimeoutError):
+                pass
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     try:
         run_worker()
     except KeyboardInterrupt:
-        print("\n[Worker] 종료했습니다.")
+        print('\n[Worker] 종료했습니다.')
