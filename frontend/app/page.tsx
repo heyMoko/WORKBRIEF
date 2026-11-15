@@ -63,6 +63,7 @@ function errorMessage(data: ApiError, fallback: string) {
 }
 
 export default function Home() {
+  const [workspace, setWorkspace] = useState<"agent" | "knowledge" | "report">("agent");
   const [file, setFile] = useState<File | null>(null);
   const [report, setReport] = useState<Report | null>(null);
   const [draft, setDraft] = useState("");
@@ -463,13 +464,17 @@ export default function Home() {
   }
 
   return (
-    <main className="min-h-screen bg-slate-50 px-5 py-12 text-slate-900 sm:py-20">
+    <main id="top" className="min-h-screen bg-slate-50 px-5 py-12 text-slate-900 sm:py-20">
       <div className="workbrief-shell mx-auto max-w-4xl">
-        <header className="workbrief-hero mb-8">
-          <span className="rounded-full bg-indigo-100 px-3 py-1 text-xs font-semibold text-indigo-700">WORKBRIEF · 첫 번째 화면</span>
-          <h1 className="mt-5 text-3xl font-bold tracking-tight sm:text-4xl">매출 CSV, 한눈에 비교하기</h1>
-          <p className="mt-3 text-sm leading-7 text-slate-600 sm:text-base">두 달의 지점별 매출을 올리면 증가하거나 줄어든 금액을 바로 보여줘요.</p>
-        <nav className="workbrief-nav"><a href="#report">매출 분석</a><a href="#knowledge">업무 매뉴얼</a><a href="#agent">AI 도우미</a></nav></header>
+        <header className="workbrief-hero">
+          <div className="brand-bar"><a className="brand" href="#top" aria-label="WorkBrief 홈"><span className="brand-mark">W</span><span>workbrief<span className="brand-dot">.</span></span></a><span className="brand-caption">YOUR AI WORKSPACE</span><a className="account-link" href="#account">{user ? user.display_name + " 님" : "로그인"} <span>↗</span></a></div>
+          <div className="hero-content"><div><p className="eyebrow"><span className="status-dot" /> A LITTLE MORE CLARITY, EVERY DAY</p><h1>일의 복잡함은 덜고,<br /><span>생각에 집중하세요.</span></h1><p className="hero-description">흩어진 문서와 데이터를 한곳에.<br />WorkBrief가 필요한 답을 함께 찾아드릴게요.</p></div><div className="hero-art" aria-hidden="true"><div className="orb orb-outer"><div className="orb orb-mid"><div className="orb orb-inner"><span>W</span></div></div></div><span className="hero-art-label">WORK SMARTER<br />THINK CLEARER&nbsp; ↗</span></div></div>
+          <nav className="workspace-tabs" aria-label="업무 공간 선택">
+            <button type="button" aria-pressed={workspace === "agent"} onClick={() => setWorkspace("agent")}><span>01</span> AI 도우미 <b>↗</b></button>
+            <button type="button" aria-pressed={workspace === "knowledge"} onClick={() => setWorkspace("knowledge")}><span>02</span> 문서 검색 <b>↗</b></button>
+            <button type="button" aria-pressed={workspace === "report"} onClick={() => setWorkspace("report")}><span>03</span> 매출 분석 <b>↗</b></button>
+          </nav>
+        </header>
 
         <section id="account" className="workbrief-auth mb-8 rounded-2xl border border-sky-100 bg-white p-6 shadow-sm">
           {user ? (
@@ -479,7 +484,7 @@ export default function Home() {
           )}
         </section>
 
-        {usageHistory && (
+        {usageHistory && workspace === "report" && (
           <section aria-label="AI 사용량 누적" className="workbrief-usage mb-8 rounded-2xl border border-indigo-100 bg-white p-5 shadow-sm">
             <h2 className="font-bold">AI 사용량 누적</h2>
             <div className="mt-4 grid grid-cols-3 gap-3 text-sm">
@@ -504,9 +509,9 @@ export default function Home() {
           </section>
         )}
 
-        <section id="agent" className="workbrief-agent mb-8 rounded-2xl border border-amber-100 bg-white p-6 shadow-sm sm:p-8">
-          <span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-700">Agent · Tool Calling</span>
-          <h2 className="mt-4 text-xl font-bold">업무 도우미에게 질문하기</h2>
+        <section id="agent" hidden={workspace !== "agent"} className="workbrief-agent mb-8 rounded-2xl border border-amber-100 bg-white p-6 shadow-sm sm:p-8">
+          <span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-700">YOUR AI ASSISTANT</span>
+          <h2 className="mt-4 text-xl font-bold">무엇을 도와드릴까요?</h2>
           <p className="mt-2 text-sm leading-6 text-slate-600">AI가 질문을 보고 매출 보고서 조회 또는 업무 문서 검색 중 필요한 도구를 골라 답해요. 데이터 수정 도구는 주지 않았어요.</p>
           <form onSubmit={askWorkAgent} className="mt-5">
             <div className="flex flex-col gap-3 sm:flex-row">
@@ -551,10 +556,10 @@ export default function Home() {
           )}
         </section>
 
-        <section id="knowledge" className="workbrief-rag mb-8 rounded-2xl border border-emerald-100 bg-white p-6 shadow-sm sm:p-8">
-          <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">RAG 3단계 · 근거 기반 AI 답변</span>
-          <h2 className="mt-4 text-xl font-bold">업무 매뉴얼에서 근거 찾기</h2>
-          <p className="mt-2 text-sm leading-6 text-slate-600">문서를 등록하고 질문을 입력하면 관련 문단을 찾고, AI가 그 문단만 근거로 짧게 답해요. 답변 아래에서 사용한 근거를 확인할 수 있어요.</p>
+        <section id="knowledge" hidden={workspace !== "knowledge"} className="workbrief-rag mb-8 rounded-2xl border border-emerald-100 bg-white p-6 shadow-sm sm:p-8">
+          <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">KNOWLEDGE · 문서 검색</span>
+          <h2 className="mt-4 text-xl font-bold">문서에서 답을 찾다</h2>
+          <p className="mt-2 text-sm leading-6 text-slate-600">문서를 등록하고 질문해 보세요. 관련 내용을 찾아 답변과 함께 근거를 보여드려요. 검색은 내 문서 전체를 대상으로 해요.</p>
           <form onSubmit={uploadDocument} className="mt-5">
             <label htmlFor="manual-file" className="block text-sm font-semibold">업무 매뉴얼 등록</label>
             <input id="manual-file" type="file" accept=".txt,.md,text/plain,text/markdown" onChange={chooseDocument}
@@ -579,7 +584,7 @@ export default function Home() {
             </div>
           </form>
           <form onSubmit={searchDocument} className="mt-6">
-            <label htmlFor="document-question" className="block text-sm font-semibold">매뉴얼에 질문하기</label>
+            <label htmlFor="document-question" className="block text-sm font-semibold">문서에 질문하기</label>
             <div className="mt-3 flex flex-wrap gap-4 text-sm text-slate-700">
               <label className="flex items-center gap-2"><input type="radio" name="search-mode" checked={searchMode === "keyword"} onChange={() => setSearchMode("keyword")} /> 단어 검색</label>
               <label className="flex items-center gap-2"><input type="radio" name="search-mode" checked={searchMode === "semantic"} disabled={documentIndex?.index_status !== "ready"} onChange={() => setSearchMode("semantic")} /> 의미 검색 (AI) {documentIndex?.index_status !== "ready" && <span className="text-xs text-slate-400">준비 중</span>}</label>
@@ -641,7 +646,7 @@ export default function Home() {
           )}
         </section>
 
-        <form id="report" onSubmit={upload} className="workbrief-report-upload rounded-2xl border border-slate-200 bg-white p-6 shadow-sm sm:p-8">
+        <form id="report" hidden={workspace !== "report"} onSubmit={upload} className="workbrief-report-upload rounded-2xl border border-slate-200 bg-white p-6 shadow-sm sm:p-8">
           <label htmlFor="sales-file" className="block text-sm font-semibold">분석할 CSV 파일</label>
           <p className="mt-1 text-sm text-slate-500">거래일, 지점, 매출액, 거래ID 열이 있는 UTF-8 CSV · 1MB 이하</p>
           <input id="sales-file" type="file" accept=".csv,text/csv" onChange={chooseFile}
@@ -653,7 +658,7 @@ export default function Home() {
           {error && <p role="alert" className="mt-4 rounded-lg bg-rose-50 p-4 text-sm text-rose-700">{error}</p>}
         </form>
 
-        {report && (
+        {report && workspace === "report" && (
           <>
           <section aria-live="polite" className="workbrief-report-result mt-8 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
             <div className="border-b border-slate-200 px-6 py-5 sm:px-8">
